@@ -221,4 +221,72 @@
   )
 )
 
+;; Comprehensive dispute resolution system with automated and manual resolution
+(define-public (resolve-dispute 
+  (rental-id uint) 
+  (resolution-type (string-ascii 20))
+  (refund-percentage uint)
+  (evidence-hash (string-ascii 64)))
+  (let ((rental-data (unwrap! (map-get? rentals { rental-id: rental-id }) ERR_NOT_FOUND))
+        (escrow-data (unwrap! (map-get? rental-escrow { rental-id: rental-id }) ERR_NOT_FOUND))
+        (total-escrow (get amount escrow-data))
+        (security-deposit (get security-deposit rental-data))
+        (rental-amount (get total-amount rental-data)))
+    
+    ;; Validate dispute resolution authority
+    (asserts! (or (is-eq tx-sender CONTRACT_OWNER)
+                  (is-eq tx-sender (get owner rental-data))
+                  (is-eq tx-sender (get renter rental-data))) ERR_UNAUTHORIZED)
+    (asserts! (is-eq (get status rental-data) "disputed") ERR_INVALID_STATUS)
+    (asserts! (<= refund-percentage u100) ERR_INVALID_AMOUNT)
+    
+    ;; Calculate refund distribution based on resolution type
+    (let ((renter-refund 
+            (if (is-eq resolution-type "favor-renter")
+              (+ security-deposit (/ (* rental-amount refund-percentage) u100))
+              (if (is-eq resolution-type "favor-owner") 
+                (/ (* security-deposit refund-percentage) u100)
+                (/ total-escrow u2)))) ;; Split 50-50 for neutral resolution
+          (owner-payment (- total-escrow renter-refund)))
+      
+      ;; Process refund transfers
+      (if (> renter-refund u0)
+        (try! (as-contract (stx-transfer? renter-refund tx-sender (get renter rental-data))))
+        true)
+      
+      (if (> owner-payment u0)
+        (try! (as-contract (stx-transfer? owner-payment tx-sender (get owner rental-data))))
+        true)
+      
+      ;; Update rental status and evidence
+      (map-set rentals { rental-id: rental-id }
+        (merge rental-data { 
+          status: "resolved"
+        })
+      )
+      
+      ;; Make equipment available and update user reputation
+      (let ((equipment-data (unwrap! (map-get? equipment { equipment-id: (get equipment-id rental-data) }) ERR_NOT_FOUND)))
+        (map-set equipment { equipment-id: (get equipment-id rental-data) }
+          (merge equipment-data { available: true }))
+      )
+      
+      ;; Clean up escrow
+      (map-delete rental-escrow { rental-id: rental-id })
+      
+      ;; Log dispute resolution for transparency
+      (print {
+        event: "dispute-resolved",
+        rental-id: rental-id,
+        resolution-type: resolution-type,
+        refund-percentage: refund-percentage,
+        evidence-hash: evidence-hash,
+        resolver: tx-sender
+      })
+      
+      (ok { renter-refund: renter-refund, owner-payment: owner-payment })
+    )
+  )
+)
+
 
